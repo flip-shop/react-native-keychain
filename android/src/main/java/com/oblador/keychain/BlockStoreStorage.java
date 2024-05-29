@@ -44,13 +44,20 @@ public class BlockStoreStorage implements KeyValueStorage {
     String passwordKey = getKeyForPassword(service);
     String cipherStorageKey = getKeyForCipherStorage(service);
 
+    Log.d(TAG, "getEncryptedEntry service=+"+ service + ", usernameKey=" +usernameKey + ", passwordKey="+ passwordKey+", cipherStorageKey="+cipherStorageKey);
+
     RetrieveBytesRequest retrieveRequest = createRetrieveRequest(usernameKey, passwordKey, cipherStorageKey);
     Task<RetrieveBytesResponse> task = blockstoreClient.retrieveBytes(retrieveRequest)
-      .addOnSuccessListener(__ -> Log.d(TAG, "getEncryptedEntry: Fetching keys=(" + usernameKey + "," + passwordKey + "," + cipherStorageKey + ") from BlockStore API SUCCEEDED."))
+      .addOnSuccessListener(d -> {
+        Log.d(TAG, "getEncryptedEntry: Fetching keys=(" + usernameKey + "," + passwordKey + "," + cipherStorageKey + ") from BlockStore API SUCCEEDED.");
+        Log.d(TAG, "getEncryptedEntry: Fetching keys dataSize="+d.getBlockstoreDataMap().keySet().size());
+      })
       .addOnFailureListener(error -> Log.e(TAG, "getEncryptedEntry: Fetching keys=(" + usernameKey + "," + passwordKey + "," + cipherStorageKey + ") from BlockStore API FAILED: " + error.getMessage()));
+    Log.d(TAG, "getEncryptedEntry before await");
 
     try {
       Map<String, BlockstoreData> blockstoreData = Tasks.await(task).getBlockstoreDataMap();
+      Log.d(TAG, "getEncryptedEntry after await");
 
       BlockstoreData usernameData = blockstoreData.get(usernameKey);
       BlockstoreData passwordData = blockstoreData.get(passwordKey);
@@ -60,7 +67,11 @@ public class BlockStoreStorage implements KeyValueStorage {
       byte[] password = passwordData != null ? passwordData.getBytes() : null;
       String cipherStorageName = cipherStorageData != null ? new String(cipherStorageData.getBytes(), StandardCharsets.UTF_8) : null;
 
+      Log.d(TAG, "getEncryptedEntry VALUES: username="+ username + ", password=" +password + ", cipherStorageName="+ cipherStorageName+ ", keysSize="+blockstoreData.keySet().size());
+
       if (username == null || password == null) {
+        Log.d(TAG, "getEncryptedEntry returning as values also null");
+
         return null;
       }
 
@@ -69,6 +80,7 @@ public class BlockStoreStorage implements KeyValueStorage {
         // version of this library. The older version used Facebook Conceal, so we default to that.
         cipherStorageName = KnownCiphers.FB;
       }
+      Log.d(TAG, "getEncryptedEntry returning: cipherStorageName="+ username + ", password=" +password + ", cipherStorageName="+ cipherStorageName);
 
       return new ResultSet(cipherStorageName, username, password);
     } catch (Exception exception) {
@@ -116,6 +128,8 @@ public class BlockStoreStorage implements KeyValueStorage {
       .storeBytes(cipherStorageRequest)
       .addOnSuccessListener(result -> Log.d(TAG, "Saving key=" + keyForCipherStorage + " to BlockStore API SUCCEEDED, wrote " + result + " bytes."))
       .addOnFailureListener(error -> Log.e(TAG, "Saving key=" + keyForCipherStorage + " to BlockStore API FAILED: " + error));
+
+    Log.d(TAG, "storeEncryptedEntry service=+"+ service + ", usernameKey=" +keyForUsername + ", passwordKey="+ keyForPassword+", cipherStorageKey="+keyForCipherStorage);
   }
 
   /**
