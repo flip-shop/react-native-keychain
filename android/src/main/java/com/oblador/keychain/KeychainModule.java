@@ -1,5 +1,7 @@
 package com.oblador.keychain;
 
+import static com.facebook.react.bridge.Arguments.makeNativeArray;
+
 import android.os.Build;
 import android.text.TextUtils;
 import android.util.Log;
@@ -17,14 +19,13 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableMap;
-import com.oblador.keychain.PrefsStorage.ResultSet;
+import com.oblador.keychain.KeyValueStorage.ResultSet;
 import com.oblador.keychain.cipherStorage.CipherStorage;
 import com.oblador.keychain.cipherStorage.CipherStorage.DecryptionResult;
 import com.oblador.keychain.cipherStorage.CipherStorage.EncryptionResult;
 import com.oblador.keychain.cipherStorage.CipherStorageBase;
-import com.oblador.keychain.cipherStorage.CipherStorageFacebookConceal;
+import com.oblador.keychain.cipherStorage.CipherStorageBase64;
 import com.oblador.keychain.cipherStorage.CipherStorageKeystoreAesCbc;
-import com.oblador.keychain.cipherStorage.CipherStorageKeystoreRsaEcb;
 import com.oblador.keychain.decryptionHandler.DecryptionResultHandler;
 import com.oblador.keychain.decryptionHandler.DecryptionResultHandlerProvider;
 import com.oblador.keychain.exceptions.CryptoFailedException;
@@ -40,8 +41,6 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import javax.crypto.Cipher;
-
-import static com.facebook.react.bridge.Arguments.makeNativeArray;
 
 @SuppressWarnings({"unused", "WeakerAccess", "SameParameterValue"})
 public class KeychainModule extends ReactContextBaseJavaModule {
@@ -108,7 +107,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
   }
 
   /** Supported ciphers. */
-  @StringDef({KnownCiphers.FB, KnownCiphers.AES, KnownCiphers.RSA})
+  @StringDef({KnownCiphers.FB, KnownCiphers.AES, KnownCiphers.RSA, KnownCiphers.BS})
   public @interface KnownCiphers {
     /** Facebook conceal compatibility lib in use. */
     String FB = "FacebookConceal";
@@ -116,6 +115,8 @@ public class KeychainModule extends ReactContextBaseJavaModule {
     String AES = "KeystoreAESCBC";
     /** Biometric + RSA. */
     String RSA = "KeystoreRSAECB";
+    /** Block Store API. */
+    String BS = "BlockStoreAPI";
   }
 
   /** Secret manipulation rules. */
@@ -130,7 +131,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
   /** Name-to-instance lookup  map. */
   private final Map<String, CipherStorage> cipherStorageMap = new HashMap<>();
   /** Shared preferences storage. */
-  private final PrefsStorage prefsStorage;
+  private final KeyValueStorage blockStoreStorage;
   //endregion
 
   //region Initialization
@@ -138,15 +139,16 @@ public class KeychainModule extends ReactContextBaseJavaModule {
   /** Default constructor. */
   public KeychainModule(@NonNull final ReactApplicationContext reactContext) {
     super(reactContext);
-    prefsStorage = new PrefsStorage(reactContext);
+    blockStoreStorage = new BlockStoreStorage(reactContext);
 
-    addCipherStorageToMap(new CipherStorageFacebookConceal(reactContext));
+    addCipherStorageToMap(new CipherStorageBase64());
+//    addCipherStorageToMap(new CipherStorageFacebookConceal(reactContext));
     addCipherStorageToMap(new CipherStorageKeystoreAesCbc());
 
     // we have a references to newer api that will fail load of app classes in old androids OS
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-      addCipherStorageToMap(new CipherStorageKeystoreRsaEcb());
-    }
+//    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+//      addCipherStorageToMap(new CipherStorageKeystoreRsaEcb());
+//    }
   }
 
   /** Allow initialization in chain. */
@@ -167,6 +169,12 @@ public class KeychainModule extends ReactContextBaseJavaModule {
       final long startTime = System.nanoTime();
 
       Log.v(KEYCHAIN_MODULE, "warming up started at " + startTime);
+      CipherStorage bestStorage = getCipherStorageForCurrentAPILevel();
+      boolean isCipherBaseStorage = bestStorage instanceof CipherStorageBase;
+      if (!isCipherBaseStorage) {
+        Log.v(KEYCHAIN_MODULE, "Skipping warming up after " + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime) + " ms as storage doesn't use crypto API");
+        return;
+      }
       final CipherStorageBase best = (CipherStorageBase) getCipherStorageForCurrentAPILevel();
       final Cipher instance = best.getCachedInstance();
       final boolean isSecure = best.supportsSecureHardware();
@@ -212,6 +220,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
                                     @NonNull final String password,
                                     @Nullable final ReadableMap options,
                                     @NonNull final Promise promise) {
+
     try {
       throwIfEmptyLoginPassword(username, password);
 
@@ -221,7 +230,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
       throwIfInsufficientLevel(storage, level);
 
       final EncryptionResult result = storage.encrypt(alias, username, password, level);
-      prefsStorage.storeEncryptedEntry(alias, result);
+      blockStoreStorage.storeEncryptedEntry(alias, result);
 
       final WritableMap results = Arguments.createMap();
       results.putString(Maps.SERVICE, alias);
@@ -278,7 +287,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
                                     @Nullable final ReadableMap options,
                                     @NonNull final Promise promise) {
     try {
-      final ResultSet resultSet = prefsStorage.getEncryptedEntry(alias);
+      final ResultSet resultSet = blockStoreStorage.getEncryptedEntry(alias);
 
       if (resultSet == null) {
         Log.e(KEYCHAIN_MODULE, "No entry found for service: " + alias);
@@ -339,7 +348,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
   }
 
   private Collection<String> doGetAllGenericPasswordServices() throws KeyStoreAccessException {
-    final Set<String> cipherNames = prefsStorage.getUsedCipherNames();
+    final Set<String> cipherNames = blockStoreStorage.getUsedCipherNames();
 
     Collection<CipherStorage> ciphers = new ArrayList<>(cipherNames.size());
     for (String storageName : cipherNames) {
@@ -371,7 +380,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
                                       @NonNull final Promise promise) {
     try {
       // First we clean up the cipher storage (using the cipher storage that was used to store the entry)
-      final ResultSet resultSet = prefsStorage.getEncryptedEntry(alias);
+      final ResultSet resultSet = blockStoreStorage.getEncryptedEntry(alias);
 
       if (resultSet != null) {
         final CipherStorage cipherStorage = getCipherStorageByName(resultSet.cipherStorageName);
@@ -381,7 +390,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
         }
       }
       // And then we remove the entry in the shared preferences
-      prefsStorage.removeEntry(alias);
+      blockStoreStorage.removeEntry(alias);
 
       promise.resolve(true);
     } catch (KeyStoreAccessException e) {
@@ -405,9 +414,10 @@ public class KeychainModule extends ReactContextBaseJavaModule {
   @ReactMethod
   public void hasInternetCredentialsForServer(@NonNull final String server,
                                               @NonNull final Promise promise) {
+
     final String alias = getAliasOrDefault(server);
 
-    final ResultSet resultSet = prefsStorage.getEncryptedEntry(alias);
+    final ResultSet resultSet = blockStoreStorage.getEncryptedEntry(alias);
 
     if (resultSet == null) {
       Log.e(KEYCHAIN_MODULE, "No entry found for service: " + alias);
@@ -449,9 +459,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
     try {
       String reply = null;
 
-      if (!DeviceAvailability.isStrongBiometricAuthAvailable(getReactApplicationContext())) {
-        reply = null;
-      } else {
+      if (DeviceAvailability.isStrongBiometricAuthAvailable(getReactApplicationContext())) {
         if (isFingerprintAuthAvailable()) {
           reply = FINGERPRINT_SUPPORTED_NAME;
         } else if (isFaceAuthAvailable()) {
@@ -709,7 +717,7 @@ public class KeychainModule extends ReactContextBaseJavaModule {
       decryptionResult.getSecurityLevel());
 
     // store the encryption result
-    prefsStorage.storeEncryptedEntry(service, encryptionResult);
+    blockStoreStorage.storeEncryptedEntry(service, encryptionResult);
 
     // clean up the old cipher storage
     oldCipherStorage.removeKey(service);
